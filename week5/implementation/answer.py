@@ -1,8 +1,8 @@
 from pathlib import Path
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+import os
+from openai import OpenAI
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_core.messages import SystemMessage, HumanMessage, convert_to_messages
 from langchain_core.documents import Document
 
 from dotenv import load_dotenv
@@ -10,11 +10,10 @@ from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
-MODEL = "gpt-4.1-nano"
 DB_NAME = str(Path(__file__).parent.parent / "vector_db")
 
-# embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-embeddings = OpenAIEmbeddings(model="text-embedding-3-large")
+# Use HuggingFace embeddings (same as day2/day3)
+embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 RETRIEVAL_K = 10
 
 SYSTEM_PROMPT = """
@@ -26,9 +25,28 @@ Context:
 {context}
 """
 
+# Configure OpenAI client for Databricks or OpenAI
+openai_api_key = os.getenv('OPENAI_API_KEY')
+
+if openai_api_key:
+    MODEL = "gpt-4o-mini"  # Fast and cost-effective OpenAI model
+    openai = OpenAI()
+else:
+    # Use Databricks AI Gateway
+    MODEL = "databricks-gpt-oss-120b"  # Databricks free tier model
+    try:
+        # dbutils is a global object in Databricks notebooks, not a module
+        databricks_token = dbutils.notebook.entry_point.getDbutils().notebook().getContext().apiToken().get()
+    except:
+        databricks_token = os.environ.get("DATABRICKS_TOKEN", "dummy-token")
+    
+    openai = OpenAI(
+        api_key=databricks_token,
+        base_url="https://7474647277163805.ai-gateway.cloud.databricks.com/mlflow/v1"
+    )
+
 vectorstore = Chroma(persist_directory=DB_NAME, embedding_function=embeddings)
 retriever = vectorstore.as_retriever()
-llm = ChatOpenAI(temperature=0, model_name=MODEL)
 
 
 def fetch_context(question: str) -> list[Document]:
@@ -54,8 +72,30 @@ def answer_question(question: str, history: list[dict] = []) -> tuple[str, list[
     docs = fetch_context(combined)
     context = "\n\n".join(doc.page_content for doc in docs)
     system_prompt = SYSTEM_PROMPT.format(context=context)
-    messages = [SystemMessage(content=system_prompt)]
-    messages.extend(convert_to_messages(history))
-    messages.append(HumanMessage(content=question))
-    response = llm.invoke(messages)
-    return response.content, docs
+    
+    # Build messages for OpenAI API
+    messages = [{"role": "system", "content": system_prompt}]
+    
+    # Add history
+    for msg in history:
+        messages.append({"role": msg["role"], "content": msg["content"]})
+    
+    # Add current question
+    messages.append({"role": "user", "content": question})
+    
+    # Call OpenAI API (works with both OpenAI and Databricks)
+    response = openai.chat.completions.create(model=MODEL, messages=messages, temperature=0)
+    content = response.choices[0].message.content
+    
+    # Handle Databricks structured response format if needed
+    if isinstance(content, list):
+        for item in content:
+            if isinstance(item, dict) and item.get('type') == 'text':
+                answer = item.get('text', '')
+                break
+        else:
+            answer = str(content)
+    else:
+        answer = content
+    
+    return answer, docs

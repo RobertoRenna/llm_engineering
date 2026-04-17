@@ -1,4 +1,5 @@
 import sys
+import os
 import math
 from pydantic import BaseModel, Field
 from litellm import completion
@@ -10,7 +11,27 @@ from implementation.answer import answer_question, fetch_context
 
 load_dotenv(override=True)
 
-MODEL = "gpt-4.1-nano"
+# Configure for Databricks or OpenAI
+openai_api_key = os.getenv('OPENAI_API_KEY')
+
+if openai_api_key:
+    MODEL = "gpt-4o-mini"  # Fast and cost-effective OpenAI model
+    # litellm will use OpenAI by default when OPENAI_API_KEY is set
+else:
+    # Configure litellm to use Databricks AI Gateway
+    MODEL = "databricks-gpt-oss-120b"
+    
+    # Get Databricks token
+    try:
+        # dbutils is a global object in Databricks notebooks, not a module
+        databricks_token = dbutils.notebook.entry_point.getDbutils().notebook().getContext().apiToken().get()
+    except:
+        databricks_token = os.environ.get("DATABRICKS_TOKEN", "dummy-token")
+    
+    # Set environment variables for litellm to use Databricks
+    os.environ["DATABRICKS_API_KEY"] = databricks_token
+    os.environ["DATABRICKS_API_BASE"] = "https://7474647277163805.ai-gateway.cloud.databricks.com/mlflow/v1"
+
 db_name = "vector_db"
 
 
@@ -152,8 +173,14 @@ Provide detailed feedback and scores from 1 (very poor) to 5 (ideal) for each di
         },
     ]
 
-    # Call LLM judge with structured outputs (async)
-    judge_response = completion(model=MODEL, messages=judge_messages, response_format=AnswerEval)
+    # Call LLM judge with structured outputs
+    # For Databricks, litellm will use the environment variables we set above
+    judge_response = completion(
+        model=MODEL, 
+        messages=judge_messages, 
+        response_format=AnswerEval,
+        custom_llm_provider="openai" if openai_api_key else "databricks"
+    )
 
     answer_eval = AnswerEval.model_validate_json(judge_response.choices[0].message.content)
 
